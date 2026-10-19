@@ -14,10 +14,10 @@ export const createProduct = async (req, res) => {
       location,
     } = req.body;
 
-    // Validate required fields
+
     if (
-      !title ||
-      !description ||
+      !title?.trim() ||
+      !description?.trim() ||
       !category ||
       !condition ||
       !listingType
@@ -29,20 +29,35 @@ export const createProduct = async (req, res) => {
       });
     }
 
-    // Images are disabled for now
-    const images = [];
 
-    // Create product in MongoDB
+    const images = (req.files || [])
+      .map((file) => file.path)
+      .filter(Boolean);
+
+
+    let productPrice = 0;
+
+    if (price !== undefined && price !== "") {
+      productPrice = Number(price);
+
+      if (!Number.isFinite(productPrice) || productPrice < 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Price must be a valid non-negative number.",
+        });
+      }
+    }
+
     const product = await Product.create({
-      title,
-      description,
-      price,
+      title: title.trim(),
+      description: description.trim(),
+      price: productPrice,
       category,
       condition,
       listingType,
       images,
       location,
-      seller: req.user.id,
+      seller: req.user._id ?? req.user.id,
     });
 
     return res.status(201).json({
@@ -51,6 +66,8 @@ export const createProduct = async (req, res) => {
       product,
     });
   } catch (error) {
+    console.error("Create product error:", error);
+
     if (
       error.name === "ValidationError" ||
       error.name === "CastError"
@@ -61,11 +78,9 @@ export const createProduct = async (req, res) => {
       });
     }
 
-    console.error("Create product error:", error);
-
     return res.status(500).json({
       success: false,
-      message: "Internal server error.",
+      message: "Failed to create product.",
     });
   }
 };
@@ -82,7 +97,6 @@ export const getAllProducts = async (req, res) => {
       sort = "newest",
     } = req.query;
 
-    // Validate pagination parameters.
     const page = Number(req.query.page ?? 1);
     const limit = Number(req.query.limit ?? 10);
 
@@ -99,7 +113,6 @@ export const getAllProducts = async (req, res) => {
       });
     }
 
-    // Build filters. Only active listings are public.
     const filter = { status: "active" };
 
     if (search?.trim()) {
@@ -194,7 +207,6 @@ export const getProductById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Reject malformed MongoDB IDs.
     if (!mongoose.isValidObjectId(id)) {
       return res.status(400).json({
         success: false,
@@ -202,7 +214,6 @@ export const getProductById = async (req, res) => {
       });
     }
 
-    // Only active listings are publicly visible.
     const product = await Product.findOne({
       _id: id,
       status: "active",
@@ -229,6 +240,7 @@ export const getProductById = async (req, res) => {
   }
 };
 
+
 export const updateProduct = async (req, res) => {
   try {
     const { id } = req.params;
@@ -240,36 +252,141 @@ export const updateProduct = async (req, res) => {
       });
     }
 
-    // Only the owner can update this listing.
     const product = await Product.findOne({
       _id: id,
-      seller: req.user.id,
+      seller: req.user._id ?? req.user.id,
     });
 
     if (!product) {
       return res.status(404).json({
         success: false,
-        message: "Product not found.",
+        message: "Product not found or you do not own this listing.",
       });
     }
 
-    // Only allow these fields to be updated.
-    const allowedFields = [
-      "title",
-      "description",
-      "price",
-      "category",
-      "condition",
-      "listingType",
-      "images",
-      "location",
+    if (product.status !== "active") {
+      return res.status(400).json({
+        success: false,
+        message: "Only active listings can be edited.",
+      });
+    }
+
+    const {
+      title,
+      description,
+      price,
+      category,
+      condition,
+      listingType,
+      location,
+      existingImages,
+    } = req.body;
+
+    if (
+      !title?.trim() ||
+      !description?.trim() ||
+      !category ||
+      !condition ||
+      !listingType ||
+      !location?.trim()
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide all required listing fields.",
+      });
+    }
+
+    let retainedImages;
+
+    try {
+      retainedImages =
+        existingImages === undefined
+          ? product.images
+          : JSON.parse(existingImages);
+    } catch {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid existing images data.",
+      });
+    }
+
+    if (
+      !Array.isArray(retainedImages) ||
+      !retainedImages.every((url) => typeof url === "string") ||
+      retainedImages.some((url) => !product.images.includes(url))
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid image selection.",
+      });
+    }
+
+    const newImages = (req.files || [])
+      .map((file) => file.path)
+      .filter(Boolean);
+
+    if (retainedImages.length + newImages.length > 5) {
+      return res.status(400).json({
+        success: false,
+        message: "A listing can have a maximum of 5 images.",
+      });
+    }
+
+    const allowedListingTypes = [
+      "sale",
+      "rent",
+      "exchange",
+      "donation",
     ];
 
-    for (const field of allowedFields) {
-      if (req.body[field] !== undefined) {
-        product.set(field, req.body[field]);
-      }
+    const allowedCategories = [
+      "books",
+      "electronics",
+      "hostel-essentials",
+      "clothing",
+      "furniture",
+      "sports",
+      "other",
+    ];
+
+    const allowedConditions = [
+      "new",
+      "like-new",
+      "good",
+      "fair",
+    ];
+
+    if (
+      !allowedListingTypes.includes(listingType) ||
+      !allowedCategories.includes(category) ||
+      !allowedConditions.includes(condition)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid listing type, category, or condition.",
+      });
     }
+
+    const productPrice = Number(price);
+
+    if (
+      !Number.isFinite(productPrice) ||
+      productPrice < 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Price must be a valid non-negative number.",
+      });
+    }
+
+    product.title = title.trim();
+    product.description = description.trim();
+    product.category = category;
+    product.condition = condition;
+    product.listingType = listingType;
+    product.location = location.trim();
+    product.price = productPrice;
+    product.images = [...retainedImages, ...newImages];
 
     await product.save();
 
@@ -279,14 +396,17 @@ export const updateProduct = async (req, res) => {
       product,
     });
   } catch (error) {
-    if (error.name === "ValidationError" || error.name === "CastError") {
+    console.error("Update product error:", error);
+
+    if (
+      error.name === "ValidationError" ||
+      error.name === "CastError"
+    ) {
       return res.status(400).json({
         success: false,
         message: error.message,
       });
     }
-
-    console.error("Update product error:", error);
 
     return res.status(500).json({
       success: false,
@@ -294,6 +414,7 @@ export const updateProduct = async (req, res) => {
     });
   }
 };
+
 
 export const deleteProduct = async (req, res) => {
   try {
@@ -306,7 +427,7 @@ export const deleteProduct = async (req, res) => {
       });
     }
 
-    // Only the owner can delete this listing.
+
     const product = await Product.findOne({
       _id: id,
       seller: req.user.id,
@@ -319,7 +440,7 @@ export const deleteProduct = async (req, res) => {
       });
     }
 
-    // Soft delete: keep the record, but hide it from public listings.
+
     product.status = "removed";
     await product.save();
 
@@ -377,8 +498,7 @@ export const updateProductStatus = async (req, res) => {
       });
     }
 
-    // A sold item or rented item should not be reactivated
-    // through this endpoint. Create a new listing instead.
+  
     if (["sold", "rented"].includes(product.status)) {
       return res.status(400).json({
         success: false,
@@ -447,7 +567,6 @@ export const getMyProducts = async (req, res) => {
       });
     }
 
-    // Always restrict results to the logged-in seller.
     const filter = { seller: req.user.id };
 
     if (status) {
