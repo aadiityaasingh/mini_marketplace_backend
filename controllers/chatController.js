@@ -199,12 +199,45 @@ export const sendMessage = async (req, res) => {
     await conversation.save();
 
     await message.populate("sender", "name");
+
     const io = req.app.get("io");
 
+    // Deliver the message to participants in the conversation.
     io.to(`conversation:${conversation._id.toString()}`).emit(
       "new-message",
       message,
     );
+
+    // Identify the participant who should receive the notification.
+    const recipientId =
+      conversation.buyer.toString() === senderId.toString()
+        ? conversation.seller
+        : conversation.buyer;
+
+    // Save and deliver the notification separately, so a notification
+    // failure does not turn an already-saved message into an API error.
+    try {
+      const notification = await Notification.create({
+        recipient: recipientId,
+        sender: senderId,
+        type: "new_message",
+        title: `New message from ${message.sender?.name || "Campus member"}`,
+        message: text.length > 100 ? `${text.slice(0, 97)}...` : text,
+        link: `/chats/${conversation._id}`,
+        relatedConversation: conversation._id,
+        relatedMessage: message._id,
+      });
+
+      await notification.populate("sender", "name");
+
+      // Only the intended recipient's authenticated sockets receive it.
+      io.to(`user:${recipientId.toString()}`).emit(
+        "notification:new",
+        notification,
+      );
+    } catch (notificationError) {
+      console.error("Create message notification error:", notificationError);
+    }
 
     return res.status(201).json({
       success: true,
@@ -217,6 +250,68 @@ export const sendMessage = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Unable to send message.",
+    });
+  }
+};
+
+export const markMessagesAsRead = async (req, res) => {
+  try {
+    const userId = req.user?._id ?? req.user?.id;
+    const { conversationId } = req.params;
+
+    if (!mongoose.isValidObjectId(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid conversation ID.",
+      });
+    }
+
+    // Only participants can mark messages in this conversation as read.
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      $or: [{ buyer: userId }, { seller: userId }],
+    });
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        message: "Conversation not found.",
+      });
+    }
+
+    // Mark only messages sent by the other participant as read.
+    const result = await Message.updateMany(
+      {
+        conversation: conversationId,
+        sender: { $ne: userId },
+        readBy: { $ne: userId },
+      },
+      {
+        $addToSet: { readBy: userId },
+      },
+    );
+
+    // Notify the other participant if any messages changed to read.
+    if (result.modifiedCount > 0) {
+      const io = req.app.get("io");
+
+      io.to(`conversation:${conversationId}`).emit("messages-read", {
+        conversationId,
+        readerId: String(userId),
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Messages marked as read.",
+      modifiedCount: result.modifiedCount,
+    });
+  } catch (error) {
+    console.error("Mark messages as read error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to mark messages as read.",
     });
   }
 };
