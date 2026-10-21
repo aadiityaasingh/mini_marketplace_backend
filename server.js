@@ -21,6 +21,7 @@ import productRoutes from "./routes/productRoutes.js";
 import uploadRoutes from "./routes/uploadRoutes.js";
 import wishlistRoutes from "./routes/wishlistRoutes.js";
 import chatRoutes from "./routes/chatRoutes.js";
+import notificationRoutes from "./routes/notificationRoutes.js";
 
 const app = express();
 
@@ -71,6 +72,7 @@ io.use((socket, next) => {
 /* Allow authenticated users to join only their own conversations. */
 io.on("connection", (socket) => {
   console.log(`Socket connected: ${socket.id}`);
+  socket.join(`user:${socket.data.user.id}`);
 
   socket.on("join-conversation", async (conversationId, callback) => {
     const reply = typeof callback === "function" ? callback : () => {};
@@ -141,6 +143,7 @@ app.use("/api/products", productRoutes);
 app.use("/api/uploads", uploadRoutes);
 app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/chats", chatRoutes);
+app.use("/api/notifications", notificationRoutes);
 
 // Health check
 app.get("/api/health", (req, res) => {
